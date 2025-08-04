@@ -1,0 +1,2 @@
+define(["require","exports","OK/EventBus"],(function(require,e,i){"use strict";Object.defineProperty(e,"__esModule",{value:!0}),e.INDICATE_LOADING_REACT_TOOLBAR_SEARCH=e.VISIBILITY_TOOLBAR_NAV=void 0;var a=i.EventBus.factory("toolbarManager");e.VISIBILITY_TOOLBAR_NAV=a("visibilityToolbarNavigation"),e.INDICATE_LOADING_REACT_TOOLBAR_SEARCH=a("indicateLoadingReactToolbarSearch")}));
+//# sourceMappingURL=/res/source-maps/js/app/ToolbarSearchEventBuses.js.map

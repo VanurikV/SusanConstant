@@ -1,0 +1,1674 @@
+/*global define,OK */
+/**
+ * js-hook для one/app/community/dk/rdk/gui/layer/mediatopic/MediaTopicLayer.html
+ */
+
+define(['jquery', 'OK/logger', 'OK/utils/utils', 'OK/utils/dom', 'OK/OhManager', 'OK/utils/vanilla', 'OK/AccessibleModal', 'OK/EventBus'], function ($, logger, utils, dom, ohManager, vanilla, accessibleModal, eventBusModule) {
+    "use strict";
+
+    var fullyLoaded;
+    OK.onload.addCallback(function() { fullyLoaded = true; });
+
+    var eventFactory = eventBusModule.EventBus.factory('MtLayer');
+
+    var MT_LAYER_STATE_CHANGED = eventFactory('stateChanged');
+
+    var mtLayerState,
+        $window = null,
+        $body = null,
+        mtLayerId = 'mtLayer',
+        mtLayerMainId = 'mtLayerMain',
+        mtLayerBackId = 'mtLayerBack',
+        mtLayerForwardId = 'mtLayerForward',
+        mtLayerBackReactId = 'mtLayerBackReact',
+        mtLayerForwardReactId = 'mtLayerForwardReact',
+        mtLayerScrollToTopId = 'scrollToTopMtLayer',
+
+        mtLayerClass = 'media-layer js-viewport-container',
+        mtLayerHolderClass = 'media-layer_hld',
+        mtLayerDiscHolderClass = 'mlr_disc',
+        mtLayerCloseClass = 'media-layer_close',
+        mtLayerCloseClassV2 = 'js-mlr-close',
+        mtLayerCloseIcoClass = 'media-layer_close_ico',
+        mtLayerCloseBackgroundClass = 'media-layer_close_ovr',
+        mtCommentsPanelClass = 'sticky-plank_cnt',
+        mtLayerFixerClass = 'media-layer_fixer',
+        js_mediaLayerActions = 'js_mediaLayerActions',
+
+        mtLayerMinHeight = 310,
+
+    // core elements
+        mtLayer = null,
+        mtLayerMain = null,
+        mtHolder = null,
+        mtDiscussionHolder = null,
+        mtCommentsPanel = null,
+        mtClose = null,
+        // Временно для переезда на реакт-кнопку закрытия. Вычистить с MediaLayerRedesign2023.tooltipsEnabled
+        mtCloseV2 = null,
+        mtCloseBackground = null,
+
+    // back / forward arrows
+        mtLayerBack = null,
+        mtLayerBackReact = null,
+        mtLayerForward = null,
+        mtLayerForwardReact = null,
+        mtLayerScrollToTop = null,
+
+    // window resize params
+        mtLayerThresholdWidth = 1145,
+        mtLayerThrottle = {
+            id: null,
+            to: 75
+        },
+
+        LAYER_BODY_BLOCK_ID = 'MediaTopicLayerBody',
+        LAYER_BANNER_BLOCK_ID = 'MediaTopicLayerAd',
+        ANONYM_LAYER_BANNER_BLOCK_ID = 'AnonymMediaTopicLayerAd',
+        LAYER_DISABLED = 'layer__disabled',
+        INVISIBLE = 'invisible',
+        BANNER_SEQUENCE_SHOW_COUNT = 'data-banner-seq-show-count', // сколько раз один и тот же баннер показывали подряд
+        activated = false,
+        ownerType,
+        byShortlink,
+
+        focused = false,
+        bannerLoaderSubscription,
+        offerSaveButton = null,
+
+        activatedDef = utils.deferred();
+
+    function presentWithoutClasses(id, classes) {
+        var el = document.getElementById(id),
+            index;
+
+        if (!el) {
+            return false;
+        }
+
+        for (index = 0; index < classes.length; index += 1) {
+            if (el.classList.contains(classes[index])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function isActiveAndNotHidden() {
+        return mtLayerState.isActive && !$("#hook_Block_PopLayerMediaTopic").hasClass(LAYER_DISABLED);
+    }
+
+    function isActiveAndHidden() {
+        return mtLayerState.isActive && $("#hook_Block_PopLayerMediaTopic").hasClass(LAYER_DISABLED);
+    }
+
+    /**
+     * События клавиатуры
+     * @param {Event} e
+     */
+    function keyHandler(e) {
+        if (isActiveAndNotHidden()) {
+            var activeElement = document.activeElement; //то, на чём сейчас фокус.
+
+            if (!focused && mtLayer[0] !== activeElement && mtLayer.find(activeElement).length === 0) {
+                mtLayer.focus(); //захватываем фокус, чтобы работал скролл по стрелкам\PgUp\PgDn и т.п. (иначе ФФ скролит фон, а Chrome - ничего)
+                focused = true;
+            }
+
+            if (mtLayer.hasClass("__edit") || mtLayer.find(".__edit").length > 0 /*второе условие удалить после включения "навсегда" экспа с полным редактированием*/) {
+                return;
+            }
+            if (mtLayer.find(".tag-box__editable").length > 0
+                || activeElement && activeElement.classList.contains("js-comments_add")) {
+                //если focus в поле для ввода коммента в леере топика, то "листалка" < > работать не должна.
+                return;
+            }
+
+            if (presentWithoutClasses('hook_Modal_popLayerModal', [LAYER_DISABLED])) {
+                return;
+            }
+
+            if (presentWithoutClasses('photoLayerWrapper', [LAYER_DISABLED, INVISIBLE])) {
+                return;
+            }
+
+            if (presentWithoutClasses('video-poplayer-cnt', [LAYER_DISABLED, INVISIBLE])) {
+                return;
+            }
+
+            if (mtLayer.hasClass('__posting')) {
+                // в ФП кнопки не обрабатываем
+                return;
+            }
+
+            if (e.keyCode === 39 && (mtLayerForward || mtLayerForwardReact)) { // forward or 'D' or numpad 6
+                if (mtLayerForwardReact) {
+                    mtLayerForwardReact.click();
+                } else {
+                    mtLayerForward.click();
+                }
+                OK.stop(e);
+            } else if (e.keyCode === 37 && (mtLayerBack || mtLayerBackReact)) { // back or 'A' or numpad 4
+                if (mtLayerBackReact) {
+                    mtLayerBackReact.click();
+                } else {
+                    mtLayerBack.click();
+                }
+                OK.stop(e);
+            }
+        }
+    }
+
+    /**
+     * Регистрируем леер
+     * @param {boolean} register
+     */
+    function registerLayerInManager(register) {
+        if (register) {
+            OK.Layers.registerWithoutAccessibility(mtLayerId,
+                function () {
+                    closeLayer("cr_esc");
+                },
+                undefined,
+                false,
+                keyHandler
+            );
+        } else {
+            OK.Layers.remove(mtLayerId);
+            // мы не зависим от контента, когда решаем удалить модалку, сразу переводим фокус и больше не думаем об этом
+            accessibleModal.AccessibleModal.removeModal(mtLayerId);
+        }
+    }
+
+    /**
+     *
+     * @param {boolean} register
+     * @param {boolean} active
+     */
+    function updateLayerManager(register, active) {
+        // регистрируем новый леер
+        OK.loader.use('OKCustomJs', function () {
+
+            if (register) {
+                registerLayerInManager(active);
+            }
+
+            // сообщаем gwt, что леер стал видимым или скрылся:
+            // нужно для того, чтобы "остановить" автоматически появляющиеся нотификации и подгрузку ленты при скролле.
+            // и тулбарным леерам (в частности, дискуссиям)
+            if (active) {
+                if (OK.Layers.onLayerShown) {
+                    OK.Layers.onLayerShown(); // LayerManager.registerForJs().
+                } // else - если gwt нет, то пользователь должен заходить в леер по прямой ссылке...
+            } else {
+                if (OK.Layers.onLayerHidden) {
+                    OK.Layers.onLayerHidden();
+                }
+            }
+        });
+    }
+
+    //
+    // применяем изменения в состоянии леера к html
+    function updateBodyClass() {
+        ohManager.switchLayer(!!mtLayerState.isActive);
+    }
+
+    function updateMTLayerClass() {
+
+        var klass = mtLayerClass;
+        if (mtLayerState.market && mtLayerState.pfMode == '') {
+            klass += ' product-layer';
+        } else {
+            klass += ' media-layer__topic';
+        }
+        if (mtLayerState.modernLayer) {
+            klass += ' __modern';
+        }
+        if (mtLayerState.v2) {
+            klass += ' __v2';
+        }
+        if (mtLayerState.pfJs) {
+            klass += ' __posting';
+        }
+        if (mtLayerState.pfWide) {
+            klass += ' __posting-wide';
+        }
+        if (mtLayerState.pfRedesign) {
+            klass += ' __posting-redesign';
+        }
+        if (mtLayerState.isActive) {
+            klass += ' __active';
+        }
+        if (mtLayerState.isProcess) {
+            klass += ' __process';
+        }
+        if (mtLayerState.isProcessTransparent) {
+            klass += ' __process-transparent';
+        }
+
+        switch (mtLayerState.pfMode) {
+            case 'N':
+                klass += ' __create';
+                break;
+            case 'E':
+                klass += ' __edit';
+                break;
+            default:
+                klass += ' __read';
+                break;
+        }
+
+        if (mtLayerState.arrowsHidden) {
+            klass += ' __hide-arrows';
+        }
+        if (mtLayerState.hasBanner) {
+            klass += ' __has-banner';
+        }
+        if (mtLayerState.redesign2023) {
+            klass += ' __layer-redesign2023';
+        }
+        if (mtLayerState.responsive) {
+            klass += ' __responsive';
+        }
+        if (mtLayerState.recommendationEnabled) {
+            klass += ' __reco-enabled';
+        }
+        if (mtLayerState.fixedArrowRedesign) {
+            klass += ' __fixed-arrow-redesign';
+        }
+        if (mtLayerState.bigArrows) {
+            klass += ' __big-arrows';
+        }
+        if (mtLayerState.tooltipsEnabled) {
+            klass += ' __tooltips-enabled';
+        }
+
+        mtLayer[0].className = klass;
+
+        MT_LAYER_STATE_CHANGED.emit(null, null);
+    }
+
+    function onVisibilityChanged() {
+        // @see scriptBottom.js OK.Layers... @see one.app.community.dk.gwt.hook.client.hooks.layer.LayerManager#register()
+        updateLayerManager(true, mtLayerState.isActive);
+        updateBodyClass();
+        updateMTLayerClass();
+
+        var bannerBlockId = getBannerBlockId();
+        if (!bannerBlockId) {
+            return;
+        }
+        var bannerBlockConfig = document.getElementById(bannerBlockId + 'Config');
+        if (!bannerBlockConfig) {
+            return;
+        }
+        var bannerPlace = bannerBlockConfig.getAttribute('data-place');
+        if (mtLayerState.isActive) {
+            mtLayer.attr(BANNER_SEQUENCE_SHOW_COUNT, 0); // обнуляем счетчик показа рекламы
+            if (bannerPlace) {
+                require(['OK/banners/BannerPlaceListeners'], function (BannerPlaceListeners) {
+                    bannerLoaderSubscription = BannerPlaceListeners.subscribeToEvents(bannerPlace, {
+                        onAdsSuccess: onAdsSuccess,
+                        onNoAds: onNoAds,
+                        onScriptError: onNoAds,
+                        onHideBanner: onNoAds
+                    });
+                });
+            }
+        } else {
+            if (bannerLoaderSubscription && typeof bannerLoaderSubscription.remove === 'function') {
+                bannerLoaderSubscription.remove();
+            }
+            clearBannerBlockWrapper(bannerBlockId);
+            setBanner(false);
+        }
+    }
+
+    function onAdsSuccess(resp) {
+        setBanner(true);
+    }
+
+    function onNoAds(resp) {
+        setBanner(false);
+    }
+
+    function clearBannerBlockWrapper(bannerBlockId) {
+        var bannerBlockWrapper = document.getElementById(bannerBlockId + 'Wrapper');
+        if (bannerBlockWrapper) {
+            bannerBlockWrapper.innerHTML = '';
+        }
+    }
+
+    function getMtLayerIntAttr(attr) {
+        var count = parseInt(mtLayer.attr(attr), 10);
+        if (isNaN(count)) {
+            count = 0;
+        }
+        return count;
+    }
+
+    function incrementMtLayerIntAttr(attr) {
+        var count = getMtLayerIntAttr(attr);
+        mtLayer.attr(attr, count + 1);
+    }
+
+    /**
+     * Меняем состояние леера
+     * @param {boolean} visible
+     */
+    function setVisible(visible) {
+        var changed = mtLayerState.isActive !== visible;
+        mtLayerState.isActive = visible;
+
+        if (changed) {
+            onVisibilityChanged();
+        } else if (isActiveAndHidden()) {
+            // дискуссии прячут леер топика (поэтому хидден),
+            // когда опять открываем леер топика, нужно прокинуть до AbstractAutoOpenRTAController#checkState инфу о том,
+            // что дискуссии перекрыты леером, иначе запустится перехват кликов по клавишам и фокус окажется в поле ввода коммента дискуссий.
+            // ДЕМОНЫ СРЕДИ НАС !!!
+            updateLayerManager(false, true);
+        }
+
+        //если открываем из леера обсуждений, то нужно убрать скрывалку лееров.
+        document.getElementById("hook_Block_PopLayerMediaTopic").classList.remove(LAYER_DISABLED);
+    }
+
+    /**
+     * Глобальный лоадер леера
+     * @param {boolean} progress
+     */
+    function setProgress(progress) {
+        var changed = mtLayerState.isProcess !== progress;
+        mtLayerState.isProcess = progress;
+
+        if (changed) {
+            updateMTLayerClass();
+        }
+    }
+
+    /**
+     * Режим редактирования топика - нужно дизаблить всё, кроме редактирования.
+     */
+    function setPfMode(pfMode) {
+        var changed = mtLayerState.pfMode !== pfMode;
+        mtLayerState.pfMode = pfMode;
+
+        if (changed) {
+            updateMTLayerClass();
+        }
+    }
+
+    function setPfJs(pfJs) {
+        var changed = mtLayerState.pfJs !== pfJs;
+        mtLayerState.pfJs = pfJs;
+
+        if (changed) {
+            updateMTLayerClass();
+        }
+    }
+
+    function setBanner(hasBanner) {
+        if (!mtLayerState) {
+            return;
+        }
+        var changed = mtLayerState.hasBanner !== hasBanner;
+        mtLayerState.hasBanner = hasBanner;
+
+        if (changed) {
+            updateMTLayerClass();
+        }
+        mtLayer.attr(BANNER_SEQUENCE_SHOW_COUNT, hasBanner ? 1 : 0);
+    }
+
+    /**
+     * Лоадер на тело леера при загрузке топика
+     * @param {boolean} progress
+     */
+    function setMainProgress(progress) {
+        mtLayerMain.toggleClass('__process', progress);
+    }
+
+    /**
+     * re-paint for position:fixed elements
+     * @param {Array.<jQuery>} elements
+     * @param {string} klass
+     * */
+    function fixControlElements(elements, klass) {
+        var
+            c = elements.length,
+            k = c;
+
+        while (--c + 1) {
+            elements[c].toggleClass(klass);
+        }
+        setTimeout(function () {
+            while (--k + 1) {
+                elements[k].toggleClass(klass);
+            }
+        }, 1);
+    }
+
+    function focusComments() {
+        // Скроллим до первого непрочитанного коммента
+        if (mtDiscussionHolder) {
+            var topOffset = 0;
+            $('.comments_i', mtDiscussionHolder).each(function () {
+                var isUnread = $(this).data('unread');
+                if (isUnread) {
+                    topOffset = this.getBoundingClientRect().top;
+                }
+                return !isUnread;
+            });
+
+            mtLayer.each(function () {
+                this.scrollTop = (topOffset !== 0)
+                    ? this.scrollTop + topOffset // Скроллим до первого непрочитанного
+                    : this.scrollHeight; // Скроллим до конца
+            });
+
+            setTimeout(function () {
+                $('.js-comments_add', mtDiscussionHolder).focus();
+            }, 50);
+        }
+    }
+
+    function updateWidgetManager() {
+        var el = document.querySelector('.js-mediatopic-widget');
+        if (el) {
+            vanilla.trigger(el, 'refreshMediatopicWidget');
+        }
+    }
+
+    /**
+     * check layer height
+     * update state if needed
+     *
+     * @param {boolean} [first]
+     * @param {boolean} [needFocusComment]
+     * @param {boolean} [scrollToMarker]
+     */
+    function updateLayerOnResize(first, needFocusComment, scrollToMarker) {
+
+        var w = $(window),
+            wh = w.height(),
+            ww = w.width();
+
+        // trigger element repaint - fix for fixed elements
+        // using throttling to decrease negative impact
+        if (mtLayerThrottle.id) {
+            clearTimeout(mtLayerThrottle.id);
+        }
+        mtLayerThrottle.id = setTimeout(function () {
+            fixControlElements([mtClose, mtLayerForward, mtLayerForwardReact, mtLayerBack, mtLayerBackReact, mtLayerScrollToTop], mtLayerFixerClass);
+            mtLayerThrottle.id = null;
+        }, first ? 0 : mtLayerThrottle.to);
+
+        // check threshold width and apply corresponding class
+        mtLayer.toggleClass('__compact', ww <= mtLayerThresholdWidth);
+
+        // min height state toggle
+        mtLayer.toggleClass('__min-height', (wh < mtLayerMinHeight));
+
+        // Скроллим до первого непрочитанного коммента
+        if (needFocusComment) {
+            focusComments();
+        }
+
+        if (scrollToMarker) {
+            scrollToBlock(scrollToMarker);
+        }
+    }
+
+    /**
+     * Вызывается для инициализации обработчиков кликов в леере.
+     * @param {boolean} needFocusComment
+     */
+    function activateIfNeeded(needFocusComment) {
+
+        if (activated) {
+            return;
+        }
+        activated = true;
+
+        $window = $(window);
+        $body = $(document.body);
+        mtLayer = $('#' + mtLayerId);
+        mtLayerMain = $('#' + mtLayerMainId);
+        mtLayerBack = $('#' + mtLayerBackId);
+        mtLayerBackReact = $('#' + mtLayerBackReactId);
+        mtLayerForward = $('#' + mtLayerForwardId);
+        mtLayerForwardReact = $('#' + mtLayerForwardReactId);
+        mtLayerScrollToTop = $('#' + mtLayerScrollToTopId);
+
+        mtLayerState = {
+            isActive: mtLayer.hasClass("__active"),
+            isProcess: mtLayer.hasClass("__process"),
+            isProcessTransparent: mtLayer.hasClass("__process-transparent"),
+            pfMode: mtLayer.hasClass("__edit") ? "E" : (mtLayer.hasClass("__create") ? "N" : ""),
+            pfJs: mtLayer.hasClass("__posting"),
+            pfWide: mtLayer.hasClass("__posting-wide"),
+            pfRedesign: mtLayer.hasClass("__posting-redesign"),
+            modernLayer: mtLayer.hasClass("__modern"),
+            v2: mtLayer.hasClass("__v2"),
+            hasBanner: mtLayer.hasClass("__has-banner"),
+            arrowsHidden: mtLayer.hasClass("__hide-arrows"),
+            redesign2023: mtLayer.hasClass("__layer-redesign2023"),
+            responsive: mtLayer.hasClass("__responsive"),
+            recommendationEnabled: mtLayer.hasClass("__reco-enabled")
+        };
+
+        mtHolder = mtLayer.find('.' + mtLayerHolderClass);
+        mtClose = mtHolder.find('.' + mtLayerCloseClass);
+        mtCloseV2 = mtHolder.find('.' + mtLayerCloseClassV2);
+        mtCloseBackground = mtLayer.find('.' + mtLayerCloseBackgroundClass);
+
+        mtLayer.on('click', function (e) {
+            if (!dom.parent(e.target, 'js-mlr-block', false, true)) {
+                closeLayer("cr_shadow");
+            }
+        });
+
+        mtClose.on('click', function (e) {
+            closeLayer("cr_close");
+        });
+
+        mtCloseV2.on('click', function (e) {
+            closeLayer("cr_close");
+        });
+
+        if (mtLayerState.isActive) {
+
+            // приводим "боди" и всё остальное в корректное состояние. active == true, только если мы попадаем в леер по шортлинку.
+            onVisibilityChanged();
+
+            if (!mtLayerState.isProcess) {
+                // контент уже подгружен, значит нужно правильно его расположить
+                updateLayerOnResize(true, needFocusComment);
+            }
+        }
+
+        if (needFocusComment) {
+            focusComments();
+        }
+
+        // пересчитываем координаты при ресайзе
+        $window.on('resize.mtLayer', function () {
+            updateLayerOnResize();
+        });
+
+        activatedDef.resolve(mtLayer);
+    }
+
+    var stateBeforeLayer;
+    var myState;
+    var myQuery;
+
+    function putItemToCache(base, query) {
+        if (query == null || query.length == 0) {
+            return; //ничего не делаем...
+        }
+
+        OK.historyManager.putItemToCache(base, query);
+    }
+
+    function updateHistoryState(url) {
+
+        if (OK.historyManager.isHistorySupported()) {
+
+            var i = url.indexOf('?');
+            if (i > 0) {
+                myQuery = url.substr(i + 1);
+                myState = url.substr(0, i);
+                // support motivator layer deep link push to address bar
+                myState = decodeURIComponent(myState);
+                if (myQuery.length > 0) {
+                    //бага в вебКитах - переход, переход, назад - скролл на верху, назад - скролл там где надо.
+                    //для фикса сохроняем позицию страницы при открытии леера, чтобы по back её можно было в MTLayerExtenstion восстановить.
+                    myQuery += "&mt.scrollTop=" + $(window).scrollTop();
+                } else {
+                    myQuery = null;
+                }
+                putItemToCache(myState, myQuery);
+            } else {
+                myState = url;
+                myQuery = null;
+            }
+
+            /**
+             * Если леер открывается по клику back в браузере, то при орисовке не нужно пушить урл ещё раз.
+             * Она уже находится в строке браузера (см. HistoryManager).
+             *
+             * А при закрытии леера нужно будет сделать ещё один "back".
+             * Н-р, лента -> леер -> профайл автора -> (back) леер -> (back || close) лента
+             */
+            var hist = getCurrentHistoryState() == myState && !byShortlink;
+
+            var replaceState;
+            if (!stateBeforeLayer) {
+
+                if (hist) {
+                    replaceState = true; // back должен закрывать леер!                         \
+                } else {
+                    if (byShortlink) {
+                        setCurrentHistoryState(byShortlink, true);
+                    }
+                }
+                stateBeforeLayer = getCurrentHistoryState();
+            } else {
+                // back должен вернуть назад к топику с решарой, если из него был отрыт леер оригинала (решары), иначе закрыть леер.
+                replaceState = !mtLayerState.closeTopicId;
+            }
+
+            byShortlink = '';
+
+            if (!hist) {
+                setCurrentHistoryState(myState, replaceState);
+            }
+        }
+        //else { если не поддерживается html5 фича, то просто не меняем урл... }
+    }
+
+    function clearHistoryState() {
+        if (!stateBeforeLayer && myState == getCurrentHistoryState()) {
+            setCurrentHistoryState(stateBeforeLayer, true); // возвращаем то, что было, если теперь урл в заголовке не поддерживается.
+        }
+        stateBeforeLayer = null;
+        myState = null;
+        myQuery = null;
+    }
+
+    /**
+     * @see Html5HistoryImpl.java
+     */
+    function getCurrentHistoryState() {
+        return OK.historyManager.getState();
+    }
+
+    function setCurrentHistoryState(state, replaceState) {
+        if (replaceState) {
+            OK.historyManager.replaceState(state);
+        } else {
+            OK.historyManager.pushState(state);
+        }
+    }
+
+    function closeLayer(closeReason, closeConfirmed) {
+        if (closeReason == "cr_shadow") {
+            if (mtLayerState.pfMode != "") {
+                return;
+            }
+        }
+
+        if (mtLayerState.pfMode != "" && !closeConfirmed && (closeReason === "cr_esc" || closeReason === "cr_close")) {
+            var postingElement = mtLayer.find(".posting");
+            if (postingElement.length > 0) {
+                var posting = postingElement[0].okPosting;
+
+                if (posting) {
+                    if (posting.needConfirmBeforeClose()) {
+                        // показываем диалог "вы точно хотите закрыть ФП?"
+                        posting.showCloseConfirmDialog();
+                    } else {
+                        // закрываем форму (и леер) или открываем в леере оригинальный топик.
+                        posting.closeWithoutConfirmDialog();
+                    }
+                    return;
+                }
+            }
+
+        }
+
+        if (mtLayerState.confirmCloseOffer) {
+            mtLayerState.confirmCloseOffer = false;
+            vanilla.ajax({
+                url: OK.getCurrentStateLink(),
+                data: {
+                    'cmd': 'PopLayer',
+                    'st.layer.cmd': 'ConfirmCloseOffer',
+                    'st.layer.offerId': mtLayerState.topicId
+                }
+            }).then(vanilla.updateBlockModelCallback);
+            return;
+        }
+
+        focused = false;
+
+        mtLayerState.topicId = null;
+        mtLayerState.owner = null;
+
+        var closeTopicId = mtLayerState.closeTopicId,
+            closeOwnerType = mtLayerState.closeOwnerType;
+
+        mtLayerState.closeTopicId = null;
+        mtLayerState.closeOwnerType = null;
+
+        if (closeTopicId && (closeReason === "cr_esc" /* действие совершил пользователь, а не, н-р, закрытие леере при переходе по ссылке внутри леера. */ || closeReason === "cr_shadow" || closeReason === "cr_close" || closeReason === "cr_fail" /* не смогли показать топик */)) {
+
+            if (closeReason) {
+                _log(closeReason + "_ct");
+            }
+
+            // "cr_esc":
+            // Обработчик esc вызывается после того, как леер уже вытолкнут из стека,
+            // но до того, как происходит unbind и переключение global scrolling'a.
+            // поэтому, если мы хотим по esc вернуться в предыдущий леер, то
+            // нужно дождаться окончания всех операций в леер манагер (для этого setTimeout)
+            // и заново зарегистрировать себя в леер манагере (см. showTopicInLayer).
+            // в принципе, можно и без setTimeout, но ссыкотно, т.к. сильно завязано на имлементацию.
+            setTimeout(function () {
+                if (OK.historyManager.isHistorySupported()) {
+                    OK.historyManager.back();
+                } else {
+                    // нам, как бы, не нужны эти closeTopicId, достаточно признака, что класть урл нужно без реплейса, но пока нет поддержки не html5 хистори, приходится тянуть это за собой (для ие8\9)
+                    showTopicInLayer(closeTopicId, closeOwnerType, '');
+                }
+            }, 0);
+
+            return;
+        }
+
+        var wasActiveAndNotHidden = isActiveAndNotHidden();
+
+        var historyBack = false;
+
+        if (wasActiveAndNotHidden) {
+            // в противном случае менять строку не нужно, она уже скрыта! и заменяем только себя.
+            if (stateBeforeLayer && myState == getCurrentHistoryState()) {
+                if (stateBeforeLayer == myState) {
+                    // мы попали в леер по нажатию на "back".
+                    historyBack = true; //оставлям леер открытым, чтобы закрыть его (если потребуется) из обработчика historyBack (MTLayerExtension).
+                    OK.historyManager.back();
+                } else {
+                    //ХХХ: тут есть вселенская печаль. Если myState == current, то нужно делать history.back.
+                    //     НО, в этом случае lenta->Topic->Music (крестик) -> Topic (крестик) приведут к Music, а не Lenta
+                    //     (a крестик в музыке вернёт топик и так до бесконечности - виновата музыка, которая при закрытии крестиком _пушит_ леер топика, а не делает back).
+                    //     Поэтому при закрытии приходится делать replace, который опять всё ломает, а именно:
+                    //     Lenta->Topic (крестик)  приводит к Lenta->Lenta в history и forward просто не доступен (не получится открыть леер),
+                    //     а back переведёт из Lenta в Lenta.
+                    //     Если закрывать леер не крестиком, а через back, то такого не будет.
+
+                    setCurrentHistoryState(stateBeforeLayer, true);
+                }
+            }
+        }
+
+        if (!historyBack) {
+            setVisible(false);
+            setProgress(false);
+            setPfMode("");
+            setMainProgress(false);
+            hideLayerArrows();
+            hideShortcutMenus();
+
+            mtLayerScrollToTop.removeClass("__active __animated");
+
+            OK.hookModel.setHookContent(LAYER_BODY_BLOCK_ID, ""); //чтобы флеш плееры все умерли.
+        }
+
+        stateBeforeLayer = null;
+
+        if (closeReason) {
+            _log(closeReason);
+        }
+
+        mtLayer.trigger('mtLayer.close');
+    }
+
+    function _log(action) {
+        logger.success("mtlayer", ownerType || "", action);  // GWTOperations.MT_LAYER
+    }
+
+    /**
+     * Прячем стрелки перехода
+     */
+    function hideLayerArrows() {
+        if (mtLayerBackReact) {
+            mtLayerBackReact.removeClass("__active");
+        }
+
+        mtLayerBack.removeClass("__active");
+
+        if (mtLayerForwardReact) {
+            mtLayerForwardReact.removeClass("__active");
+        }
+
+        mtLayerForward.removeClass("__active");
+    }
+
+    function setBackTopicId(backTopicId, backOwnerType) {
+        if (mtLayerBackReact) {
+            mtLayerBackReact.toggleClass("__active", !!backTopicId && !!backOwnerType);
+            mtLayerBackReact
+                .unbind("click.back")
+                .bind("click.back",
+                    function (e) {
+                        if (mtLayerBackReact.hasClass("__active")) {
+                            var hasOpp = mtLayerForwardReact.hasClass('__active');
+                            showTopicInLayer(backTopicId, backOwnerType, 'MT_GoBack_' + backOwnerType, //see: ClientActivityId.MT_GoBack_***
+                                false, // need focus comment
+                                '', 'BACK', hasOpp);
+                        }
+                        OK.stop(e);
+                    }
+                );
+        }
+        if (mtLayerBack) {
+            mtLayerBack.toggleClass("__active", !!backTopicId && !!backOwnerType);
+            mtLayerBack
+                .unbind("click.back")
+                .bind("click.back",
+                function (e) {
+                    if (mtLayerBack.hasClass("__active")) {
+                        var hasOpp = mtLayerForward.hasClass('__active');
+                        showTopicInLayer(backTopicId, backOwnerType, 'MT_GoBack_' + backOwnerType, //see: ClientActivityId.MT_GoBack_***
+                            false, // need focus comment
+                            '', 'BACK', hasOpp);
+                    }
+                    OK.stop(e);
+                }
+            );
+        }
+    }
+
+    function setForwardTopicId(forwardTopicId, forwardOwnerType) {
+        if (mtLayerForwardReact) {
+            mtLayerForwardReact.toggleClass("__active", !!forwardTopicId && !!forwardOwnerType);
+            mtLayerForwardReact
+                .unbind("click.forward")
+                .bind("click.forward",
+                function (e) {
+                    if (mtLayerForwardReact.hasClass("__active")) {
+                        var hasOpp = mtLayerBackReact.hasClass('__active');
+                        showTopicInLayer(forwardTopicId, forwardOwnerType, 'MT_GoForward_' + forwardOwnerType, //see: ClientActivityId.MT_GoForward_***
+                            false, // need focus comment
+                            '', 'FORWARD', hasOpp);
+                    }
+                    OK.stop(e);
+                }
+            );
+        }
+        if (mtLayerForward) {
+            mtLayerForward.toggleClass("__active", !!forwardTopicId && !!forwardOwnerType);
+            mtLayerForward
+                .unbind("click.forward")
+                .bind("click.forward",
+                function (e) {
+                    if (mtLayerForward.hasClass("__active")) {
+                        var hasOpp = mtLayerBack.hasClass('__active');
+                        showTopicInLayer(forwardTopicId, forwardOwnerType, 'MT_GoForward_' + forwardOwnerType, //see: ClientActivityId.MT_GoForward_***
+                            false, // need focus comment
+                            '', 'FORWARD', hasOpp);
+                    }
+                    OK.stop(e);
+                }
+            );
+        }
+    }
+
+    /**
+     *
+     * @param {boolean }scrollToMarker
+     */
+    function scrollToBlock(scrollToMarker) {
+        if (scrollToMarker) {
+            var anchor = mtLayer.find("[data-scroll-to='" + scrollToMarker + "']");
+
+            if (anchor.length > 0) {
+                var e = anchor[0],
+                    absoluteTop = e.offsetTop,
+                    p = e.offsetParent;
+
+                while (p && p.nodeType === 1 && p !== mtLayer[0]) {
+                    absoluteTop += p.offsetTop;
+                    p = p.offsetParent;
+                }
+
+                var win = mtLayer,
+                    clientHeight = win.height(),
+                    scrollTop = win.scrollTop(),
+                    height = clientHeight; //якорь имеет нулевую высоту. чтобы контент под ним стал видимым, делаем его близким к доступной высоте.
+
+                if (scrollTop + clientHeight <= absoluteTop + height) {
+                    win.scrollTop(absoluteTop + height - clientHeight - 5);
+                } else if (scrollTop > absoluteTop) {
+                    win.scrollTop(absoluteTop - 5);
+                }
+            }
+        }
+    }
+
+    /**
+     * Прячем шоткат-меню при переключении или закрытии леера
+     */
+    function hideShortcutMenus() {
+
+        var $where = $body; //возможно стоит только в леере искать? чтобы не добавлять кучу исключений?
+
+        var gwtSm = $where.find('.gwt-shortcutMenu__show');
+        if (gwtSm.length) {
+            gwtSm.removeClass('gwt-shortcutMenu__show');
+        }
+
+        var modernSm = $where.find('.sc-menu:not(.sc-menu__hidden,.poll_ans_cnt)');
+        if (modernSm.length) {
+            modernSm = modernSm.not(
+                '#ownProfileLSMnu' // CSS _unique_ selectors list - 'selector-1, selector-2, ...'
+            );
+
+            modernSm.addClass('sc-menu__hidden');
+        }
+    }
+
+    var intervals = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610]; //1 == 0.1s = 100ms
+    function timeIntervalMs(startAt, endAt) {
+        var spent = (endAt - startAt) / 100; // ms в "интервалах".
+        var max;
+        for (max = 1; max < intervals.length; max++) {
+            if (spent < intervals[max]) {
+                break;
+            }
+        }
+        return intervals[max - 1] + "00"; //ms
+    }
+
+    /**
+     * Отскролл вверх
+     */
+    function rewindScroll() {
+        if (mtLayer) {
+            mtLayer.scrollTop(0);
+        }
+    }
+
+    function dropProgress(logEnded) {
+        if (mtLayerState.isProcess) {
+            setProgress(false);
+        } else {
+            setMainProgress(false);
+        }
+        logEnded && logEnded();
+    }
+
+    function showPreloaded(owner, byShortlink0, needFocusComment, hideNav, logEnded) {
+        byShortlink = byShortlink0;
+
+        activateIfNeeded(needFocusComment);
+        var blockData = $('#' + LAYER_BODY_BLOCK_ID);
+
+        mtLayerState.market = blockData.attr('data-market') == 'true';
+        mtLayerState.advertSelectionId = blockData.attr('data-adv-sel-id');
+        mtLayerState.modernLayer = blockData.attr('data-modernLayer') === 'true';
+        mtLayerState.pfWide = blockData.attr('data-pf-wide') === 'true';
+        mtLayerState.pfRedesign = blockData.attr('data-pf-redesign') === 'true';
+        mtLayerState.v2 = blockData.attr('data-v2') === 'true';
+        mtLayerState.redesign2023 = blockData.attr('data-redesign2023') === 'true';
+        mtLayerState.responsive = blockData.attr('data-responsive') === 'true';
+        mtLayerState.recommendationEnabled = blockData.attr('data-recommendation-enabled') === 'true';
+        mtLayerState.fixedArrowRedesign = blockData.attr('data-fixed-arrow-redesign') === 'true';
+        mtLayerState.bigArrows = blockData.attr('data-big-arrows') === 'true';
+        mtLayerState.tooltipsEnabled = blockData.attr('data-tooltips-enabled') === 'true';
+
+        var log = blockData.attr('data-log');
+        if (log) {
+            _log(log);
+        }
+
+        var pfMode = blockData.attr('data-pf-mode');
+        setPfMode(pfMode ? pfMode : false);
+        var pfJs = blockData.attr('data-pf-js');
+        setPfJs(pfJs === 'true');
+
+        var url = blockData.attr('data-url');
+        if (url) {
+            updateHistoryState(url);
+        } else {
+            clearHistoryState();
+        }
+
+        if (mtLayerState.closeTopicId || hideNav) {
+            // решили не показывать листалку, если топик был открыт из другого леера топиков или она просто не нужна.
+        } else {
+            var backId = blockData.attr('data-back-id');
+            setBackTopicId(backId, owner);
+
+            var forwardId = blockData.attr('data-forward-id');
+            setForwardTopicId(forwardId, owner);
+        }
+
+        var topicId = blockData.attr('data-id');
+        if (topicId) {
+            mtLayerState.topicId = topicId;
+            mtLayerState.owner = owner;
+        }
+        if (owner === "OFFER") {
+            offerSaveButton = mtLayer.find('.js-offer-save-button');
+            if (offerSaveButton.length) {
+                mtLayerState.confirmCloseOffer = true;
+                offerSaveButton.on('click', function () {
+                    mtLayerState.confirmCloseOffer = false;
+                });
+            }
+        }
+
+        var logClick = blockData.attr('data-log-click');
+        if (logClick) {
+            mtLayer.attr("data-l", logClick);
+        } else {
+            mtLayer.removeAttr("data-l");
+        }
+
+        var jsActions = mtHolder.find('.' + js_mediaLayerActions);
+        if (jsActions.length > 0) {
+            var handler = function (e) {
+                //Сделать запрос на веб и рефрешнуть с доп.классом ....
+                var actionUrl = e.delegateTarget.getAttribute('data-url');
+                var uid = e.delegateTarget.getAttribute('uid');
+                if (actionUrl) {
+                    if (uid) {
+                        var request = $.ajax({
+                                                 type: 'POST',
+                                                 url: actionUrl,
+                                                 data: {
+                                                     'gwt.requested': window.pageCtx.gwtHash
+                                                 },
+                                                 headers: {"TKN": OK.tkn.get()}
+                                             });
+                        request.done(
+                            function (data, textStatus, xhr) {
+                                jsActions.children().unbind("click.advert");
+                                _refreshLayerBody('PLAdvertStatusBackToView', function () {
+                                    mtHolder
+                                        .find('.' + js_mediaLayerActions)
+                                        .children()
+                                        .bind("click.advert", handler);
+                                });
+                            }
+                        );
+                    } else {
+                        window.navigateOnUrlFromJS(actionUrl);
+                    }
+                }
+                OK.stop(e);
+            };
+            jsActions.children().bind("click.advert", handler);
+        }
+
+        if (!mtLayerState.isProcess) {
+            updateMTLayerClass(); // при листании тоже нужно обновлять __redesign
+        }
+
+        dropProgress(logEnded);
+
+        // нужно починить позиционирование стрелок
+        fixControlElements([mtLayerForward, mtLayerForwardReact, mtLayerBack, mtLayerBackReact, mtLayerScrollToTop], mtLayerFixerClass);
+
+        rewindScroll();
+
+        mtDiscussionHolder = mtHolder.find('.' + mtLayerDiscHolderClass);
+        mtCommentsPanel = mtHolder.find('.' + mtCommentsPanelClass);
+
+        var scrollToMarker = blockData.attr('data-scroll-to-marker');
+        updateLayerOnResize(true, needFocusComment, scrollToMarker);
+    }
+
+    function getBannerBlockId() {
+        if (document.getElementById('hook_Block_' + LAYER_BANNER_BLOCK_ID)) {
+            return LAYER_BANNER_BLOCK_ID;
+        }
+        if (document.getElementById('hook_Block_' + ANONYM_LAYER_BANNER_BLOCK_ID)) {
+            return ANONYM_LAYER_BANNER_BLOCK_ID;
+        }
+        return null;
+    }
+
+    function requestNewBanner(isLayerSlide) {
+        var bannerBlockId = getBannerBlockId();
+        var isActive = bannerBlockId && mtLayerState.isActive;
+        if (!isActive) {
+            return false;
+        }
+        if (isLayerSlide) {
+            var bannerBlockConfig = document.getElementById(bannerBlockId + 'Config');
+            if (bannerBlockConfig) {
+                var everyNDisplay = bannerBlockConfig.getAttribute('data-everyNDisplay');
+                if (everyNDisplay) {
+                    var bannerSeqShowCount = getMtLayerIntAttr(BANNER_SEQUENCE_SHOW_COUNT);
+                    if (bannerSeqShowCount === 0) {
+                        return true; // при предыдущем просмотре топика в леере не было баннера
+                    }
+                    return (bannerSeqShowCount % everyNDisplay) === 0;
+                }
+            }
+        }
+        return true;
+    }
+
+    /*
+    * ВНИМАНИЕ! Если правишь это место, то не забудь про или ты оторвешь функционал в самых неожиданных для тебя местах
+    * one/app/community/dk/gwt/desktop/client/MTLayerExtension.java:362
+    * */
+    function showTopicInLayer(topicId, owner, activityId,
+                              needFocusComment,
+                              byShortlink0,       // линк на состояние "под леером топика" при открытии по прямой ссылке
+                              direction, hasOpp, // листание
+                              withComments,
+                              closeTopicId, closeOwnerType,
+                              hideNav,
+                              toBlockIndex) { // открытие леера топика из другого топика
+        return showTopicInLayerWithOptions({
+            topicId: topicId,
+            owner: owner,
+            activityId: activityId,
+            needFocusComment: needFocusComment,
+            byShortlink: byShortlink0,
+            direction: direction,
+            hasOpp: hasOpp,
+            withComments: withComments,
+            closeTopicId: closeTopicId,
+            closeOwnerType: closeOwnerType,
+            hideNav: hideNav,
+            toBlockIndex: toBlockIndex
+        });
+    }
+
+    function showTopicInLayerWithOptions(options) {
+
+        var topicId = options.topicId,
+            owner = options.owner,
+            activityId = options.activityId,
+            needFocusComment = options.needFocusComment,
+            byShortlink0 = options.byShortlink, // линк на состояние "под леером топика" при открытии по прямой ссылке
+            direction = options.direction,
+            hasOpp = options.hasOpp, // листание
+            withComments = options.withComments,
+            // открытие леера топика из другого топика
+            closeTopicId = options.closeTopicId,
+            closeOwnerType = options.closeOwnerType,
+            hideNav = options.hideNav,
+            toBlockIndex = options.toBlockIndex,
+            hobbyType = options.hobbyType,
+            hobbyCategory = options.hobbyCategory,
+            logPlace = options.logPlace,
+            recoDisabled = options.recoDisabled,
+            commentsDisabled = options.commentsDisabled
+        ;
+
+        activateIfNeeded(needFocusComment);
+
+        var startAt = Date.now();
+        var networkEndAt = -1;
+        var activateEndAt = -1;
+
+        var renderStartAt;
+
+        if (!direction) {
+            // вложенные цепочки не будем поддерживать (топик - решара - дискуссии - другой топик - закрыли)
+            // листалку будем.
+            mtLayerState.closeTopicId = null;
+            mtLayerState.closeOwnerType = null;
+        }
+
+        //MTLayerExtension.OPEN_RESHARED
+        if (activityId && activityId.indexOf("st.mt.or=on") !== -1) {
+            closeTopicId = mtLayerState.topicId;
+            closeOwnerType = mtLayerState.owner;
+        }
+
+        // Останавливаем все видеоплееры
+        OK.VideoPlayer.pauseAll();
+
+        // Останавливаем автоплей моментов
+        if (require.defined('OK/dailyphoto/dailyphoto-model')) {
+            require(['OK/dailyphoto/dailyphoto-model'], function (module) {
+                module.togglePlayer && module.togglePlayer(false);
+            });
+        }
+
+        OK.loader.use('OKCustomJs', function () {
+            var stack = OK.Layers.stack;
+            var onTop = stack && stack.length > 0 && stack[stack.length - 1].id === mtLayerId;
+            if (!onTop && mtLayerState.isActive) {
+                //1) переносим леер вверх по стеку для корректной обработки keyboard
+                //2) регистрируем леер опять, если он был выкинут при обработке esc с последующим открытием леера топика (closeTopicId).
+                registerLayerInManager(true);
+            }
+        });
+
+        function logEnded(redirect) {
+            var endAt = Date.now();
+
+            var prefix = "";
+            if (redirect) {
+                prefix += "r_";  // был редирект
+            }
+            if (direction) {
+                prefix += "dt";  // время на вставку топика при листании (в ms)
+            } else {
+                prefix += "ot";  // время на вставку топика при клике на открыть леер (в ms)
+            }
+
+            _log(prefix + timeIntervalMs(startAt, endAt));
+
+            if (renderStartAt) {
+                _log("js_" + prefix + timeIntervalMs(renderStartAt, endAt));
+            }
+
+            if (mtLayerState.pfMode) {
+                var duration = endAt - startAt;
+
+                var network = networkEndAt - startAt;
+                var activate = activateEndAt - networkEndAt;
+                var banner = endAt - activateEndAt;
+
+                var type = (ownerType || "");
+                var currentState = OK.getCurrentDesktopModelId && OK.getCurrentDesktopModelId();
+                var additional = (mtLayerState.pfJs ? "js." : "gwt.") + (fullyLoaded ? "f." : "p.") + (currentState || "");
+
+                if (duration > 0) {
+
+                    //Как быстро пользователь кликает по ФП после открытия сайта.
+                    var log = window.__gwtStatsEventsLog;
+                    if (log && log.bootstrap && log.bootstrap.begin) {
+                        var delay = (startAt - log.bootstrap.begin); //сек
+
+                        var seconds = Math.floor(delay / 1000);
+                        var mins = Math.floor(seconds / 60);
+                        var hours = Math.floor(mins / 60);
+
+                        // .s0  =  0 - 10с
+                        // .s10 = 10 - 20c
+                        // .s20 = 20 - 40c
+                        // .s40 = 40 - 60c
+
+                        // .m1  =  1 -  2м
+                        // .m2  =  2 -  3м
+                        // .m3  =  3 -  5м
+                        // .m5  =  5 - 10м
+                        // .m10 = 10 - 20м
+                        // .m20 = 20 - 40м
+                        // .m40 = 40 - 50м
+
+                        // .h1  =  1 -  2ч
+                        // .h2  =  2 -  3ч
+                        // .h3  =  3 -  4ч
+                        // . ...
+
+                        if (hours > 0) {
+                            additional += ".h" + hours;
+                        } else if (mins >= 20) {
+                            additional += ".m" + Math.floor(mins / 20) * 20;
+                        } else if (mins >= 10) {
+                            additional += ".m10";
+                        } else if (mins >= 5) {
+                            additional += ".m5";
+                        } else if (3 >= mins && mins > 0) {
+                            additional += ".m" + mins;
+                        } else if (seconds >= 20) {
+                            additional += ".s" + Math.floor(seconds / 20) * 20;
+                        } else {
+                            additional += ".s" + Math.floor(seconds / 10) * 10;
+                        }
+
+
+                        logger.duration("mtlayer", delay, "start." + type + "." + mtLayerState.pfMode, additional);
+                    }
+
+                    logger.duration("mtlayer", duration, type + "." + mtLayerState.pfMode, additional);
+
+                    if (network > 0) {
+                        logger.duration("mtlayer", network, "net." + type + "." + mtLayerState.pfMode, additional);
+                        logger.duration("mtlayer", activate, "act." + type + "." + mtLayerState.pfMode, additional);
+                        logger.duration("mtlayer", banner, "bnr." + type + "." + mtLayerState.pfMode, additional);
+                    }
+
+                } else {
+                    logger.duration("mtlayer", endAt - startAt, type + "." + mtLayerState.pfMode, additional + "_wtf")
+                }
+            }
+        }
+
+        ownerType = owner;
+        byShortlink = byShortlink0;
+
+        if (byShortlink) {
+            _log("shortlink");
+        }
+
+        hideLayerArrows(); // прячем листалку перед открытием нового леера.
+
+        if (mtLayerState.isActive && !mtLayerState.isProcess) {
+            setMainProgress(true);
+            hideShortcutMenus();
+        } else {
+            setProgress(true);
+        }
+
+        setVisible(true);
+
+        var url = OK.getCurrentStateLink();
+        url += url.indexOf('?') === -1 ? '?' : '&';
+        url = url.replace(/st\.mt\.(id|ot|bi|dir|hn|c7).*?(&|$)/g, ''); // убираем всё, что касается леера в currentStateLink, чтобы "оно" не перетёрло параметры в ajax запросе.
+        url += 'cmd=' + LAYER_BODY_BLOCK_ID;
+        if (activityId) {
+            url += '&st._aid=' + activityId; //NOTE: лента на главной добавляет к activityId постфикс &st.feedId= поэтому такой треш.
+        }
+        var isRequestNewBanner = requestNewBanner(!!direction);
+
+        var data = {
+            'gwt.requested': window.pageCtx.gwtHash,
+            'st.mt.id': topicId,
+            'st.mt.ot': owner,
+            'st.mt.dir': direction,
+            'st.mt.wc': withComments ? 'on' : 'off',
+            'st.mt.hn': hideNav ? 'on' : 'off', //передаём на веб, чтобы не запрашивались лишнии даннные
+            'st.mt.ad': isRequestNewBanner ? 'on' : 'off',
+            'st.mt.bi': toBlockIndex ? toBlockIndex : 0,
+            'st.mt.as': mtLayerState.advertSelectionId
+        };
+
+        if (recoDisabled) {
+            data['st.mt.disableReco'] = 'on';
+        }
+
+        if (commentsDisabled) {
+            data['st.mt.disableComments'] = 'on';
+        }
+
+        if (hobbyType) {
+            data['st.mt.ht'] = hobbyType;
+
+            if (hobbyCategory) {
+                data['st.mt.hc'] = hobbyCategory;
+            }
+        }
+
+        if (logPlace) {
+            data['st.mt.plpl'] = logPlace;
+        }
+
+        return vanilla.ajax({
+            url: url,
+            data: $.ajaxSetup({}, data)
+        },
+            function(redirectLocation) {
+                if (redirectLocation) {
+
+                    // OK.nav.redirect can be initialized after scriptMTLayer.js loaded and executed.
+                    // So small delay is added. It does matter when short link points to deleted topic.
+                    var redirect = function (attempt) {
+
+                        if (OK.navigation.redirect) {
+                            OK.navigation.redirect(redirectLocation);
+                        }
+
+                        if (attempt === 0 || OK.navigation.redirect) {
+                            closeLayer();
+                            logEnded();
+                        } else {
+                            setTimeout(function () {
+                                redirect(attempt - 1);
+                            }, 200);
+                        }
+                    };
+
+                    redirect(5);
+                }
+            }
+        )
+        .then(
+            function(data) {
+                renderStartAt = Date.now();
+
+                if (closeTopicId) {
+                    mtLayerState.closeTopicId = closeTopicId;
+                    mtLayerState.closeOwnerType = closeOwnerType;
+                }
+                //
+                // Показываем стрелки перехода по необходимости
+                var endReached = data.xhr.getResponseHeader('End-Reached');
+                if (endReached === 'yes') {
+                    if (direction === 'FORWARD') {
+                        if (hasOpp) {
+                            if (mtLayerBackReact) {
+                                mtLayerBackReact.toggleClass('__active', true);
+                            } else {
+                                mtLayerBack.toggleClass('__active', true);
+                            }
+                        }
+                    } else if (direction == 'BACK') {
+                        if (hasOpp) {
+                            if (mtLayerForwardReact) {
+                                mtLayerForwardReact.toggleClass('__active', true);
+                            }
+                            mtLayerForward.toggleClass('__active', true);
+                        }
+                    }
+                    dropProgress(logEnded);
+                    return;
+                }
+
+                networkEndAt = Date.now();
+
+                //
+                // Наполняем леер контентом
+                var blocksContent = data.response.split(OK.navigation.SPLITER),
+                    blockIds = data.xhr.getResponseHeader(OK.navigation.HEADER).split(",");
+
+                var isBannerRequested = false;
+                for (var i = 0; i < blocksContent.length; i++) {
+                    var blockId = blockIds[i];
+                    if (blockId) {
+                        var blockContent = blocksContent[i];
+                        OK.hookModel.setHookContent(blockId, blockContent);
+                        if (blockId === LAYER_BANNER_BLOCK_ID || blockId === ANONYM_LAYER_BANNER_BLOCK_ID) {
+                            isBannerRequested = true;
+                        }
+                    }
+                }
+
+
+                activateEndAt = Date.now();
+
+                postProcessForBanner(isBannerRequested, direction);
+
+                showPreloaded(owner, byShortlink, needFocusComment, hideNav, logEnded);
+                // we must register accessibleModals module only after the content is loaded
+                var closeButton = mtClose && mtClose.length ? mtClose[mtClose.length - 1] : undefined;
+                accessibleModal.AccessibleModal.registerModal(mtLayerId, true, undefined, closeButton);
+                updateWidgetManager();
+            },
+            function(e) {
+                closeLayer("cr_fail");
+                logEnded();
+                reject();
+            }
+        );
+    }
+
+    function postProcessForBanner(isBannerRequested, isLayerSlide) {
+        if (!isBannerRequested) {
+            var blockData = document.getElementById(LAYER_BODY_BLOCK_ID);
+            if (blockData.getAttribute('data-hide-ad') === 'true') {
+                // доп. проверка в случае, когда не запрашивался новый баннер, но для нового отображаемого
+                // топика текущий баннер не должен отображаться (например, топик рекламный)
+                clearBannerBlockWrapper(getBannerBlockId());
+                setBanner(false);
+            } else if (isLayerSlide && mtLayerState.hasBanner) {
+                // новый баннер не запрашивался, но текущий никуда не делся
+                incrementMtLayerIntAttr(BANNER_SEQUENCE_SHOW_COUNT);
+            }
+        }
+    }
+
+    function _refreshLayerBody(activity, callback) {
+        function done() {
+            if (callback) callback();
+        }
+
+        //смотрим на последний топик отрисованный в леере
+        if (!mtLayerState || !mtLayerState.topicId || !mtLayerState.owner) {
+            done();
+            return;
+        }
+
+        var url = OK.getCurrentStateLink();
+        url += url.indexOf('?') === -1 ? '?' : '&';
+        url += 'cmd=' + LAYER_BODY_BLOCK_ID + '&st._aid=' + activity;
+        var request = $.ajax({
+                                 type: 'POST',
+                                 url: url,
+                                 data: {
+                                     'gwt.requested': window.pageCtx.gwtHash,
+                                     'st.mt.id': mtLayerState.topicId,
+                                     'st.mt.ot': mtLayerState.owner
+                                 },
+                                 headers: {"TKN": OK.tkn.get()}
+                             });
+
+        request.done(
+            function (data, textStatus, xhr) {
+
+                var redirectLocation = xhr.getResponseHeader('Redirect-Location');
+                if (redirectLocation) {
+
+                    if (OK.navigation.redirect) {
+                        OK.navigation.redirect(redirectLocation);
+                    }
+                    closeLayer();
+
+                } else {
+
+                    //
+                    // Наполняем леер контентом
+                    var blocksContent = data.split(OK.navigation.SPLITER),
+                        blockIds = xhr.getResponseHeader(OK.navigation.HEADER).split(",");
+
+                    for (var i = 0; i < blocksContent.length; i++) {
+                        if (blockIds[i]) {
+                            OK.hookModel.setHookContent(blockIds[i], blocksContent[i]);
+                        }
+                    }
+                }
+
+                done();
+            }
+        );
+
+        request.fail(
+            done
+        );
+
+    }
+
+    return {
+
+        show: function () {
+            activateIfNeeded();
+            setVisible(true);
+            rewindScroll();
+        },
+
+        showPreloaded: showPreloaded,
+
+        showTopicInLayer: showTopicInLayer,
+        showTopicInLayerWithOptions: showTopicInLayerWithOptions,
+
+        closeLayer: function (closeReason, closeConfirmed) {
+            if (activated) {
+                closeLayer(closeReason, closeConfirmed);
+            }
+        },
+
+        //hide & restore вызываются когда леер временно скрывается, н-р, при открытии дискуссий.
+        hideLayer: function () {
+            focused = false;
+
+            if (mtLayerState && mtLayerState.isActive) {
+                if (stateBeforeLayer && getCurrentHistoryState() == myState) {
+                    setCurrentHistoryState(stateBeforeLayer, true);
+                }
+
+                updateLayerManager(false, false);
+            }
+        },
+
+        restoreLayer: function () {
+            if (mtLayerState && mtLayerState.isActive) {
+                fixControlElements([mtClose, mtLayerForward, mtLayerForwardReact, mtLayerBack, mtLayerBackReact, mtLayerScrollToTop], mtLayerFixerClass);
+                if (stateBeforeLayer && getCurrentHistoryState() !== myState) {
+                    setCurrentHistoryState(myState, true);
+                }
+
+                updateLayerManager(false, true);
+            }
+        },
+
+        isVisible: function() {
+            return mtLayerState && isActiveAndNotHidden();
+        },
+
+        setVisible: function (visible) {
+            if (mtLayerState && mtLayerState.owner && (visible !== this.isVisible())) {
+                setVisible(visible)
+            }
+        },
+
+        /**
+         * Обновляем тело леера.
+         * Это нужно, если какое-то действие в леер открытом поверх леера топика привело к изменению в нём (н-р, фотопины).
+         *
+         * Ничего кроме вставки хтмл не происходит, т.к. нужно сохранить позицию скролла в леера.
+         * Предполагается, что все параметры (data-url и т.п.) останутся неизменными.
+         */
+        refreshLayerBody: function(callback) { _refreshLayerBody('PLPhotoUserBackToView', callback); },
+
+        /**
+         * Если блок с леером удаляется, то должены быть удалены и "мусорные" блоки.
+         */
+        deactivate: function () {
+
+            $(window).off('.mtLayer');
+            if(mtClose) {
+                mtClose.off();
+            }
+
+            if(mtCloseV2) {
+                mtCloseV2.off();
+            }
+
+            if(mtCloseBackground) {
+                mtCloseBackground.off();
+            }
+            if (offerSaveButton) {
+                offerSaveButton.off();
+            }
+
+            setVisible(false); // just for sure.
+        },
+
+        updateActiveTopics: function (topics, isActive, hideArrows) {
+            activatedDef.promise.then(function (el) {
+                mtLayerState.hasActiveTopics = isActive;
+                mtLayerState.arrowsHidden = hideArrows;
+                var topicsHeight = topics.getHeight();
+                var contentHeight = mtLayerMain.outerHeight(true);
+                if (isActive) {
+                    if (contentHeight < topicsHeight) {
+                        mtLayerMain.css('min-height', topicsHeight);
+                    } else if (contentHeight - topicsHeight < 100) {
+                        topics.setHeight(contentHeight);
+                    }
+                } else {
+                    mtLayerMain.css('min-height', '');
+                }
+
+                updateMTLayerClass();
+            });
+        },
+
+        MT_LAYER_STATE_CHANGED: MT_LAYER_STATE_CHANGED
+    };
+});

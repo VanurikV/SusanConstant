@@ -1,0 +1,185 @@
+define(["require", "exports", "OK/utils/throttle", "OK/utils/utils"], (function(require, t, e, s) {
+        "use strict";
+        var i, o;
+        Object.defineProperty(t, "__esModule", {
+            value: !0
+        }),
+            t.deactivate = t.activate = t.StickyBlockConstructor = void 0,
+            function(t) {
+                t.TOP = "top",
+                    t.SCROLL = "scroll",
+                    t.BOTTOM = "bottom",
+                    t.HIDE = "hide"
+            }(i || (i = {})),
+            function(t) {
+                t.UP = "up",
+                    t.DOWN = "down"
+            }(o || (o = {}));
+        var n = {}
+            , r = OK.topPanelHeight()
+            , l = s.gwtExperimentsCfg.mch;
+        function h(t) {
+            return t.getBoundingClientRect().top + window.pageYOffset
+        }
+        var a = function(t) {
+            this.uselessContentCompensation = 0,
+                this.topShift = 0,
+                this.scrollDirection = null,
+                this.state = null,
+                this.useHideInsteadBottom = "1" === t.getAttribute("data-use-hide"),
+            t.getAttribute("data-useless-content") && (this.uselessContent = t.querySelector(t.getAttribute("data-useless-content")),
+            this.uselessContent && (this.uselessContentCompensation = this.uselessContent.offsetHeight,
+                this.uselessContentSpacer = document.createElement("div"),
+                this.uselessContentSpacer.style.height = this.uselessContentCompensation + "px",
+                this.uselessContentSpacer.classList.add("invisible"),
+                this.uselessContent.parentElement.insertBefore(this.uselessContentSpacer, this.uselessContent))),
+                this.fixedTopThreshold = r - this.uselessContentCompensation;
+            if (c(t) === 'rightColumn') {
+                this.fixedTopThreshold += 12;
+            }
+            this.wrapperAbsoluteTop = 0,
+                this.useMouseWheel = "1" === t.getAttribute("data-mouse-wheel"),
+                this.stickyWrapper = t,
+                this.stickyContainer = document.querySelector(t.getAttribute("data-sticky-container")) || t.firstChild,
+                this.scrollContainer = document.querySelector(t.getAttribute("data-scroll-container")) || window,
+                this.mainContentColumn = document.querySelector(t.getAttribute("data-main-content-column")),
+                this.scrollHandler = e(10, this.onScroll.bind(this)),
+                this.resizeHandler = e(10, this.onResize.bind(this)),
+                this.init(!0),
+                this.render(),
+                this.scrollContainer.addEventListener("scroll", this.scrollHandler, !1),
+            this.useMouseWheel && this.scrollContainer.addEventListener("wheel", this.scrollHandler, !1),
+                window.addEventListener("resize", this.resizeHandler, !1)
+        };
+        function c(t) {
+            return t.getAttribute("data-sticky-id")
+        }
+        a.prototype.init = function(t) {
+            var e = h(this.stickyWrapper);
+            if (this.scrollDelta = 0,
+                this.scrollPosition = window.pageYOffset,
+                this.scrollDirection = null,
+            this.scrollPosition < 150 && (t = !0),
+                t)
+                this.setTopShift(0),
+                    this.setState(i.SCROLL),
+                this.uselessContent && (this.uselessContent.classList.remove("invisible"),
+                    this.uselessContentSpacer.classList.add("invisible"));
+            else if (this.wrapperAbsoluteTop && this.topShift && this.state === i.SCROLL) {
+                var s = this.topShift + (this.wrapperAbsoluteTop - e);
+                this.setTopShift(s),
+                    this.setState(i.SCROLL)
+            }
+            this.state === i.SCROLL && (this.wrapperAbsoluteTop = e)
+        }
+            ,
+            a.prototype.setState = function(t) {
+                var e = this.stickyContainer.classList
+                    , s = !1;
+                switch (t) {
+                    case i.TOP:
+                        e.remove("__fixed-bottom", "__fixed-hide"),
+                            e.add("__fixed-top"),
+                            this.stickyContainer.style.marginTop = -this.uselessContentCompensation + "px",
+                            s = !0;
+                        break;
+                    case i.SCROLL:
+                        e.remove("__fixed-top", "__fixed-bottom", "__fixed-hide"),
+                            this.stickyContainer.style.marginTop = this.topShift + "px";
+                        break;
+                    case i.BOTTOM:
+                        e.remove("__fixed-top"),
+                            e.add("__fixed-bottom"),
+                            this.stickyContainer.style.marginTop = "0",
+                            s = !0;
+                        break;
+                    case i.HIDE:
+                        e.remove("__fixed-top"),
+                            e.add("__fixed-hide"),
+                            this.stickyContainer.style.marginTop = "0",
+                            s = !0
+                }
+                s && this.uselessContent && (this.uselessContent.classList.add("invisible"),
+                    this.uselessContentSpacer.classList.remove("invisible")),
+                    this.state = t
+            }
+            ,
+            a.prototype.setTopShift = function(t) {
+                this.topShift !== t && (this.topShift = t < 0 ? 0 : t)
+            }
+            ,
+            a.prototype.render = function() {
+                var t = window.pageYOffset
+                    , e = window.innerHeight - this.fixedTopThreshold
+                    , s = this.stickyContainer.getBoundingClientRect()
+                    , n = s.height
+                    , r = h(this.stickyWrapper);
+                if (l && OK.Layers.isAnyLayerOpened || !(document.documentElement.scrollHeight - document.body.clientHeight < t))
+                    if (document.documentElement.scrollHeight <= r + n)
+                        this.init(!0);
+                    else if (this.mainContentColumn && this.stickyWrapper.clientHeight > this.mainContentColumn.clientHeight + 12)
+                        this.init(!0);
+                    else if (!this.useHideInsteadBottom && n <= e)
+                        t > r - this.fixedTopThreshold ? this.setState(i.TOP) : this.init(!0);
+                    else {
+                        if (this.scrollDirection === o.UP) {
+                            if (r - this.fixedTopThreshold > t)
+                                return void this.init(!0);
+                            switch (this.state) {
+                                case i.SCROLL:
+                                    s.top > this.fixedTopThreshold && this.setState(i.TOP);
+                                    break;
+                                case i.BOTTOM:
+                                case i.HIDE:
+                                    this.setTopShift(t + s.top - r - this.scrollDelta),
+                                        this.setState(i.SCROLL)
+                            }
+                        }
+                        if (this.scrollDirection === o.DOWN)
+                            switch (this.state) {
+                                case i.TOP:
+                                    this.setTopShift(t + s.top - r),
+                                        this.setState(i.SCROLL);
+                                    break;
+                                case i.SCROLL:
+                                    this.useHideInsteadBottom ? s.bottom <= 0 && this.setState(i.HIDE) : s.bottom <= window.innerHeight && this.setState(i.BOTTOM)
+                            }
+                        null === this.scrollDirection && 0 === this.topShift && t > r - this.fixedTopThreshold && this.setState(i.TOP)
+                    }
+            }
+            ,
+            a.prototype.destroy = function() {
+                this.scrollContainer.removeEventListener("scroll", this.scrollHandler, !1),
+                this.useMouseWheel && this.scrollContainer.removeEventListener("wheel", this.scrollHandler, !1),
+                    window.removeEventListener("resize", this.resizeHandler)
+            }
+            ,
+            a.prototype.onScroll = function() {
+                var t = window.pageYOffset;
+                t !== this.scrollPosition && (this.scrollDelta = t - this.scrollPosition,
+                    this.scrollDirection = this.scrollDelta > 0 ? o.DOWN : o.UP,
+                    this.scrollPosition = t,
+                    this.render())
+            }
+            ,
+            a.prototype.onResize = function() {
+                this.render()
+            }
+            ,
+            t.StickyBlockConstructor = a,
+            t.activate = function(t) {
+                var e = c(t);
+                if (!e)
+                    throw new Error("data-sticky-id must be specified");
+                var s = new a(t);
+                return n[e] = s,
+                    s
+            }
+            ,
+            t.deactivate = function(t) {
+                var e = c(t);
+                e && (n[e].destroy(),
+                    delete n[e])
+            }
+    }
+));

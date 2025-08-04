@@ -1,0 +1,2 @@
+define(["require","exports","OK/EventBus"],(function(require,e,u){"use strict";Object.defineProperty(e,"__esModule",{value:!0}),e.GROUP_ACCEPT_RULES=e.GROUP_JOIN=e.GroupJoinEventBusesBusesPrefix=void 0,e.GroupJoinEventBusesBusesPrefix="group.join.event";var s=u.EventBus.factory(e.GroupJoinEventBusesBusesPrefix);e.GROUP_JOIN=s("groupJoin"),e.GROUP_ACCEPT_RULES=s("groupAcceptRules")}));
+//# sourceMappingURL=/res/source-maps/js/app/GroupJoinEventBuses.js.map

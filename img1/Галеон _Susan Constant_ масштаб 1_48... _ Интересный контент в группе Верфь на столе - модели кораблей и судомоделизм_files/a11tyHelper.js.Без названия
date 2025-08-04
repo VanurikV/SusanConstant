@@ -1,0 +1,104 @@
+define(["require", "exports", "OK/utils/vanilla", "OK/utils/dom"], function (require, exports, vanilla, dom) {
+    "use strict";
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.focusToInput = exports.isInputText = exports.isVisible = exports.deactivateButton = exports.activateButton = void 0;
+    function onButtonKeyPress(e) {
+        if ((e.code === 'Enter' || e.code === 'Space') && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+            if (e.target instanceof HTMLElement) {
+                switch (e.target.tagName) {
+                    case 'INPUT':
+                    case 'BUTTON':
+                    case 'TEXTAREA':
+                        // браузер сам обработает
+                        return;
+                }
+            }
+            e.preventDefault(); // предотвращаем скролл
+            vanilla.trigger(e.target, 'click');
+        }
+    }
+    function activateButton(el) {
+        el.addEventListener('keypress', onButtonKeyPress);
+    }
+    exports.activateButton = activateButton;
+    function deactivateButton(el) {
+        el.removeEventListener('keypress', onButtonKeyPress);
+    }
+    exports.deactivateButton = deactivateButton;
+    function isInvisible(el) {
+        var invisibleEl = dom.traverseParents(el, function (testEl) {
+            return window.getComputedStyle(testEl).visibility !== 'visible';
+        }, null, true);
+        return invisibleEl !== null;
+    }
+    function isVisible(el, checkVisibility) {
+        if ( checkVisibility === void 0 ) checkVisibility = false;
+
+        if (checkVisibility && isInvisible(el)) {
+            return false;
+        }
+        if (el instanceof HTMLElement && el.offsetParent !== null) {
+            return true;
+        }
+        // Element или offsetParent null для position: fixed
+        var ref = el.getBoundingClientRect();
+        var height = ref.height;
+        var width = ref.width;
+        return height && width;
+    }
+    exports.isVisible = isVisible;
+    function isInputText(el) {
+        switch (el.tagName) {
+            case 'TEXTAREA':
+                return true;
+            case 'INPUT':
+                return el.type === 'text';
+            case 'DIV':
+                return el.contentEditable === 'true';
+            default:
+                return false;
+        }
+    }
+    exports.isInputText = isInputText;
+    function focusToInput(input, cursorToEnd) {
+        if ( cursorToEnd === void 0 ) cursorToEnd = false;
+
+        if (!isInputText(input)) {
+            return;
+        }
+        input.focus();
+        if (!cursorToEnd) {
+            return;
+        }
+        switch (input.tagName) {
+            case 'TEXTAREA':
+            case 'INPUT':
+                var it = input;
+                it.selectionStart = it.value.length;
+                break;
+            case 'DIV':
+                var selection = window.getSelection();
+                var rangeOfEndContent = selection.getRangeAt(0);
+                var lastLine = input.lastChild;
+                if (lastLine) {
+                    if (lastLine instanceof HTMLBRElement) {
+                        rangeOfEndContent.setStart(lastLine, 0);
+                        rangeOfEndContent.setEnd(lastLine, 0);
+                    }
+                    else {
+                        if (lastLine.nodeType === 3) {
+                            rangeOfEndContent.setStart(lastLine, lastLine.nodeValue.length);
+                            rangeOfEndContent.setEnd(lastLine, lastLine.nodeValue.length);
+                        }
+                        else {
+                            rangeOfEndContent.setStartAfter(lastLine);
+                            rangeOfEndContent.setEndAfter(lastLine);
+                        }
+                    }
+                }
+                break;
+        }
+    }
+    exports.focusToInput = focusToInput;
+});
+//# sourceMappingURL=/res/source-maps/js/app/a11tyHelper.js.map

@@ -1,0 +1,2 @@
+define(["require","exports","OK/EventBus"],(function(require,O,e){"use strict";Object.defineProperty(O,"__esModule",{value:!0}),O.OAUTH_ERROR_HANDLER=O.AUTH_LOGIN_POPUP_CLOSE=O.AUTH_LOGIN_POPUP_OPEN=void 0;var _=e.EventBus.factory("auth.login.popup");O.AUTH_LOGIN_POPUP_OPEN=_("authLoginPopupOpen"),O.AUTH_LOGIN_POPUP_CLOSE=_("authLoginPopupClose"),O.OAUTH_ERROR_HANDLER=_("oauthErrorHandler")}));
+//# sourceMappingURL=/res/source-maps/js/app/AuthLoginPopupEventBuses.js.map

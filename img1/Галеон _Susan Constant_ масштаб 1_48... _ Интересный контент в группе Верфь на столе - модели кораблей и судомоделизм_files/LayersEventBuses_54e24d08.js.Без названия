@@ -1,0 +1,2 @@
+define(["require","exports","OK/EventBus"],(function(require,e,s){"use strict";Object.defineProperty(e,"__esModule",{value:!0}),e.MODAL_CLOSE=e.ANY_CLOSED=e.ANY_OPENED=e.LayersEventBusesPrefix=void 0,e.LayersEventBusesPrefix="layers";var r=s.EventBus.factory(e.LayersEventBusesPrefix);e.ANY_OPENED=r("anyOpened"),e.ANY_CLOSED=r("anyClosed"),e.MODAL_CLOSE=r("modalClose")}));
+//# sourceMappingURL=/res/source-maps/js/app/LayersEventBuses.js.map

@@ -1,0 +1,630 @@
+define(['OK/logger', 'OK/cookie'], function(logger, cookie) {
+    'use strict';
+
+    var
+        URL                           = '/push?cmd=PeriodicManager&gwt.requested=' + window.pageCtx.gwtHash,
+
+        PARAM_STATE_ID                = 'p_sId',
+        PARAM_NEXT_LONG_POLLING_TIME  = 'p_NLP',
+
+        PUSH_RESPONSE_DATA_SPLITTER   = '<!--SP-->',
+        PUSH_RESPONSE_STREAM_SPLITTER = '<!--SSP-->',
+
+        STATE_WAITING                 = 0,
+        STATE_CONNECTING              = 1,
+        STATE_OPEN                    = 2,
+        PARAM_TIME_ZONE_AND_DIFF      = 'TZD',
+        PARAM_TIME_ZONE               = 'TZ',
+        PARAM_TIME_DIFF               = 'TD',
+        PARAM_MINUTES_IN_TIMEZONE     = 30,
+
+        DUMMY_XHR                     = {
+            responseText     : '',
+            open             : function(){},
+            setRequestHeader : function(){},
+            send             : function(){},
+            abort            : function(){},
+            getResponseHeader: function(){}
+        },
+        timeDiffUtil = {
+            pos        : 0,
+            size       : 0,
+            adaptive   : 0,
+            tmzOffset  : 0,
+            sum        : 0,
+            values     : [],
+            updateDiff : function(/* number */ serverTime) {
+                var date = new Date(),
+                    adaptive;
+                var diff = date.getTime() - serverTime;
+
+                this.tmzOffset = -date.getTimezoneOffset();
+                this.values[this.pos++] = diff;
+                this.pos %= 20;
+                this.sum += diff;
+                if(this.size < 20) {
+                    this.size++;
+                } else {
+                    this.sum -= this.values[this.pos];
+                }
+                adaptive = ~~(this.sum / this.size);
+                if (this.adaptive !== adaptive) {
+                    this.adaptive = adaptive;
+                    return true;
+                }
+                return false;
+            },
+            getTimeZoneHh : function() {
+                var timeZoneHh = ~~(this.tmzOffset / PARAM_MINUTES_IN_TIMEZONE);
+                if (timeZoneHh < -24 || timeZoneHh > 28) {
+                    logger.error('NFCI_TZ');
+                }
+                return timeZoneHh;
+            },
+            getTimeDiff : function() {
+                if (isNaN(this.adaptive)) {
+                    logger.error('NFCI_TD');
+                }
+                return this.adaptive;
+            }
+        },
+        cNextFetchTime         = 100,
+        cFailureDelay          = 5000,
+        cStateId               = 0,
+        cNextLongPolling       = 0,
+        cIsPushStreaming       = false,
+        cSSEBufferSize         = 2097152,
+        cSSEMaxFailCount       = 2,
+        blocksToCache          = [],
+        cacheEntrySize         = 0,
+        cLPRecoveryTime         = 150000,
+        cSSEFirstRequestRecTime = 180000,
+        cSSERecoveryTime        = 180000,
+        cSSEtoLPRecoveryTime    = 0,
+        cSSEWaitingTimeout      = 60000,
+        //variables
+        currentRecoveryTime    = 180000,
+        params                 = {},
+        blocks                 = [],
+        checkSSEStateTimerId   = null,
+        timerId                = null,
+        failureRecoveryTimerId = null,
+        inProgress             = false,
+        xhr                    = DUMMY_XHR,
+        lastCheckSSETime       = 0,
+        lastSseToLpSwitchTime  = 0,
+        currentSSEState        = STATE_WAITING,
+        charOffset             = 0,
+        failsCount             = 0,
+        chunkCount             = 0,
+        allChunkCount          = 0,
+        heartbeatSSESuffix     = '',
+        SSERecoveryCount       = 0,
+        currentTransport       = 'LP',
+        isFloodOrError,
+        processCallback,
+        destroyOnePush,
+        fireCachedData,
+        setCacheEntrySize,
+        //берём значение из GWT
+        checkSSEState = false,
+        splitTZDCookie = false,
+
+        getXHR = function() {
+            try {
+                return new window.XMLHttpRequest();
+            } catch (e) {
+                logger.success('push', 'xhr');
+                try {
+                    return new window.ActiveXObject('Microsoft.XMLHTTP');
+                } catch (e2) {
+                    logger.error('NFCI_AXO');
+                    return DUMMY_XHR;
+                }
+            }
+        },
+        cutValueForLog = function(/* number */ value) {
+            if (value >= 1000) {
+                value = 1000;
+            } else if (value >= 500) {
+                value = 500;
+            } else if (value >= 100) {
+                value = 100;
+            } else if (value >= 50) {
+                value = 50;
+            } else if (value >= 10) {
+                value = 10;
+            }
+            return value;
+        },
+        adaptServerTime = function(/* number */ serverTime) {
+            try {
+                if (timeDiffUtil.updateDiff(serverTime)) {
+                    var timeZoneHh = timeDiffUtil.getTimeZoneHh(),
+                        timeDiff = timeDiffUtil.getTimeDiff();
+                    cookie.setCookie(PARAM_TIME_ZONE_AND_DIFF, timeZoneHh + '.' + timeDiff, null, '/');
+                    if (splitTZDCookie) {
+                        cookie.setCookie(PARAM_TIME_ZONE, timeZoneHh, null, '/');
+                        cookie.setCookie(PARAM_TIME_DIFF, timeDiff, null, '/');
+                    }
+                }
+            } catch (e) {
+                logger.error('NFCI_AST');
+            }
+        },
+        getParams = function() {
+            var data = '',
+                param;
+            for (param in params) {
+                if (params.hasOwnProperty(param)) {
+                    data += param + '=' + params[param] + '&';
+                }
+            }
+            data += 'blocks=' + blocks.join(',') + '&';
+            return data + PARAM_NEXT_LONG_POLLING_TIME + '=' + cNextLongPolling;
+        },
+        getStateParamString = function() {
+            return PARAM_STATE_ID + '=' + cStateId;
+        },
+        adaptingTimer = function() {
+            if (inProgress || !executeRequest()) {
+                scheduleTimer(cFailureDelay);
+            }
+        },
+        failureTimer = function() {
+            if (currentTransport === 'SSE') {
+                var currentTime = Date.now();
+                var delay = currentSSEState === STATE_WAITING ? cSSEWaitingTimeout : currentRecoveryTime;
+                if (currentTime - delay < lastCheckSSETime) {
+                    currentRecoveryTime = calculateCurrentRecoveryTimeout();
+                    failureRecoveryTimerId = setTimeout(failureTimer,  currentRecoveryTime);
+                    return;
+                }
+                if(currentSSEState === STATE_WAITING) {
+                    logToConsole("Restore connection");
+                    logger.success('push', "restoresse");
+                }
+                if (checkSSEState || !checkNewSSEData(xhr.responseText || '')) {
+                    closeConnection('heartbeat-sse-' + heartbeatSSESuffix + failsCount);
+                    //Количество успешно пришедших чанков до залипания соединения
+                    logger.success('push', 'chunks', failsCount + '_' + cutValueForLog(chunkCount));
+                    logger.success('push', 'chunks-all', failsCount + '_' + cutValueForLog(allChunkCount));
+                    if (++failsCount >= cSSEMaxFailCount) {
+                        currentTransport = 'LP';
+                        lastSseToLpSwitchTime = currentTime;
+                    }
+                    reSchedule(cNextFetchTime);
+                } else {
+                    checkSSEState = true;
+                    checkSSEStateTimerId = setTimeout(checkSSEStateTimer, 0);
+                    failureRecoveryTimerId = setTimeout(failureTimer,  cSSERecoveryTime);
+                    logger.success('push', 'check');
+                }
+            } else {
+                inProgress = false;
+                cStateId = 0;
+                closeConnection('heartbeat-lp');
+                schedule(cNextFetchTime);
+            }
+        },
+        scheduleTimer = function(/* number */ delayMillis) {
+            clearTimeout(timerId);
+            timerId = setTimeout(adaptingTimer, delayMillis);
+        },
+        checkSSEStateTimer = function() {
+            if (currentSSEState !== STATE_WAITING) { 
+                if (xhr.readyState === 3) { 
+                    onSSEProgress();
+                }
+                checkSSEStateTimerId = setTimeout(checkSSEStateTimer, 1000);
+            }
+        },
+        schedule = function(/* number */ fetchTime) {
+            cNextFetchTime = fetchTime;
+            scheduleTimer(cNextFetchTime);
+        },
+        stopScheduling = function() {
+            clearTimeout(timerId);
+            timerId = null;
+            clearTimeout(failureRecoveryTimerId);
+            failureRecoveryTimerId = null;
+            inProgress = false;
+            if (currentSSEState !== STATE_WAITING) {
+                closeConnection('stop-sse');
+            }
+            cancelWakeupDetector();
+        },
+        reSchedule = function(/* number */ delay) {
+            inProgress = false;
+            if (timerId) {
+                scheduleTimer(delay);
+            }
+        },
+        calculateCurrentRecoveryTimeout = function() {
+            return currentTransport === 'SSE' ? (cStateId == 0 ? cSSEFirstRequestRecTime : cSSERecoveryTime) : cLPRecoveryTime;
+        },
+        executeRequest = function() {
+            try {
+                logToConsole("send");
+                if (currentTransport === 'LP' && cSSEtoLPRecoveryTime > 0 && allChunkCount > 2 && cIsPushStreaming && Date.now() - lastSseToLpSwitchTime > cSSEtoLPRecoveryTime) {
+                    SSERecoveryCount++;
+                    logger.success('push', 'recovery', SSERecoveryCount + '-' + cutValueForLog(allChunkCount));
+                    checkSSEState = false;
+                    failsCount = 0;
+                    cStateId = 0;
+                    currentTransport = 'SSE';
+                }
+                var isSSE = currentTransport === 'SSE';
+                if (isFloodOrError) {
+                    if (isFloodOrError()) {
+                        return false;
+                    }
+                } else {
+                    logger.error('NFCI_ER', 'foe-udf');
+                }
+                clearTimeout(failureRecoveryTimerId);
+                currentRecoveryTime = calculateCurrentRecoveryTimeout();
+                failureRecoveryTimerId = setTimeout(failureTimer, currentRecoveryTime);
+                inProgress = true;
+                if (processCallback) {
+                    send(isSSE);
+                } else {
+                    logger.error('NFCI_ER', 'prc-udf');
+                    reSchedule(cFailureDelay);
+                }
+            } catch (e) {
+                inProgress = false;
+                logger.error('NFCI_ER', 'trc');
+                return false;
+            }
+            return true;
+        },
+        send = function(/* boolean */ isSSE) {
+            xhr = getXHR();
+            xhr.open('POST', URL + (isSSE ? '&sse=true' : '') + '&' + getStateParamString(), true);
+            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+            xhr.setRequestHeader('Cache-Control', 'no-cache');
+            xhr.setRequestHeader('TKN', OK.tkn.get());
+            if (isSSE) {
+                xhr.onreadystatechange = xhr.onprogress = onSSEProgress;
+                charOffset = 0;
+                chunkCount = 0;
+                currentSSEState = STATE_CONNECTING;
+            } else {
+                xhr.onreadystatechange = onProgress;
+            }
+            xhr.send(getParams());
+
+            if (isSSE && checkSSEState) {
+                clearTimeout(checkSSEStateTimerId);
+                checkSSEStateTimerId = setTimeout(checkSSEStateTimer, 0);
+            }
+        },
+        onProgress = function() {
+            if (xhr.readyState !== 4) {
+                return;
+            }
+
+            if (xhr.status === 200) {
+                if (checkRedirect(xhr.getResponseHeader('Redirect-Location'))) {
+                    logger.success('push', 'redirect');
+                    reSchedule(cFailureDelay);
+                    return;
+                }
+                checkNewData(xhr);
+                reSchedule(cNextFetchTime);
+            } else {
+                logger.success('push', 'status', ''+xhr.status);
+                reSchedule(cFailureDelay);
+            }
+        },
+        checkNewData = function(xhr) {
+            var isMaster = OK.lss && OK.lss.isMaster(),
+                data = '' + [
+                    isMaster ? OK.lss.getId() : '',
+                    xhr.responseText,
+                    xhr.getResponseHeader('Rendered-Blocks'),
+                    xhr.getResponseHeader('TKN')
+                ].join(PUSH_RESPONSE_DATA_SPLITTER);
+
+            if (isMaster) {
+                setDataToStorage(data);
+            }
+            processCallback(data, false);
+        },
+        onSSEProgress = function() {
+            if (xhr.readyState < 3) {
+                return;
+            }
+            if (currentSSEState === STATE_CONNECTING) {
+                if (xhr.status === 200) {
+                    if (checkRedirect(xhr.getResponseHeader('Redirect-Location'))) {
+                        closeConnection('redirect-sse');
+                        reSchedule(cFailureDelay);
+                        return;
+                    }
+                    currentSSEState = STATE_OPEN;
+                } else {
+                    closeConnection('status-sse-'+xhr.status);
+                    reSchedule(cFailureDelay);
+                }
+            } else if (currentSSEState === STATE_OPEN) {
+                switch (xhr.readyState) {
+                    case 3:
+                        checkNewSSEData(xhr.responseText || '');
+                        break;
+                    case 4:
+                        var delay = cNextFetchTime;
+                        if (xhr.status === 0) {
+                            delay = cFailureDelay;
+                        } else if (!checkNewSSEData(xhr.responseText || '') && xhr.getResponseHeader('Rendered-Blocks')) {
+                            checkNewData(xhr);
+                        }
+                        currentSSEState = STATE_WAITING;
+                        reSchedule(delay);
+                        break;
+                }
+            }
+        },
+        checkNewSSEData = function(/* string */ responseText) {
+            var pos,
+                data,
+                isMaster,
+                found = false;
+            while (~(pos = responseText.indexOf(PUSH_RESPONSE_STREAM_SPLITTER, charOffset))) {
+                data = responseText.substring(charOffset, pos);
+                if (data) {
+                    isMaster = OK.lss && OK.lss.isMaster();
+                    data = '' + [
+                        isMaster ? OK.lss.getId() : '',
+                        data
+                    ].join(PUSH_RESPONSE_DATA_SPLITTER);
+                    if (isMaster) {
+                        setDataToStorage(data);
+                    }
+                    processCallback(data, false);
+                }
+                charOffset = pos + PUSH_RESPONSE_STREAM_SPLITTER.length;
+                lastCheckSSETime = Date.now();
+                found = true;
+                if (chunkCount < 1000) {
+                    chunkCount++;
+                }
+                if (allChunkCount < 1000) {
+                    allChunkCount++;
+                }
+                failsCount = 0;
+            }
+            if (charOffset > cSSEBufferSize) {
+                logger.success('push', 'overflow');
+            }
+            return found;
+        },
+        setDataToStorage = function(/* string */ data) {
+            try {
+                localStorage.setItem('firePushContent', data);
+            } catch (e) {
+                if (destroyOnePush) {
+                    destroyOnePush();
+                } else {
+                    logger.error('NFCI_ER', 'dop-udf');
+                }
+                try {
+                    var clob = e.message || '';
+                    var maxLength = data.length, maxName = 'pushData';
+                    for (var v in localStorage) {
+                        if (localStorage.hasOwnProperty(v)) {
+                            var length = localStorage.getItem(v).length;
+                            clob += '\n' + v + '=' + length;
+                            if(length > maxLength) {
+                                maxLength = length;
+                                maxName = v;
+                            }
+                        }
+                    }
+                    var param2 = maxLength;
+                    if(param2 > 3000000) {
+                        param2 = 3000000;
+                    } else if(param2 > 2000000) {
+                        param2 = 2000000;
+                    } else if(param2 > 1000000) {
+                        param2 = 1000000;
+                    } else if(param2 > 500000) {
+                        param2 = 500000;
+                    } else if(param2 > 100000) {
+                        param2 = 100000;
+                    } else if(param2 > 10000) {
+                        param2 = 10000;
+                    } else {
+                        param2 = 1000;
+                    }
+                    logger.clob('push', clob, 'NFCI_LSIS_' + maxName, '' + param2);
+                } catch(error) {
+                    logger.clob('push', error.stack, 'NFCI_LSISE');
+                }
+            }
+        },
+        closeConnection = function(/* string */ reason) {
+            if (currentTransport === 'SSE') {
+                currentSSEState = STATE_WAITING;
+                cStateId = 0;
+            }
+            xhr.abort();
+            logger.success('push', 'abort', reason);
+        },
+        checkRedirect = function(/* string */ redirectLocation) {
+            if (redirectLocation) {
+                if (OK.navigation.redirect) {
+                    OK.navigation.redirect(redirectLocation);
+                } else {
+                    document.location.href = decodeURIComponent(redirectLocation);
+                }
+                return true;
+            }
+            return false;
+        },
+        prevWakeUpTime = 0,
+        wakeupDetectorTimeLimit = 0,
+        wakeupDetectorInterval = 0,
+        wakeupDetectorTimerId = null,
+
+        runWakeupDetector = function () {
+            var currentTime = Date.now();
+
+            if (prevWakeUpTime != 0 && currentTime - prevWakeUpTime > wakeupDetectorTimeLimit) {
+                if (failureRecoveryTimerId) {
+                    clearTimeout(failureRecoveryTimerId);
+                    failureRecoveryTimerId = setTimeout(failureTimer, 100);
+                    logToConsole("wakeup");
+                }
+            }
+
+            if (prevWakeUpTime != 0 && !failureRecoveryTimerId && currentTransport === 'SSE') {
+                if (currentTime - currentRecoveryTime > lastCheckSSETime) {
+                    if (!isFloodOrError || !isFloodOrError()) {
+                        logger.success('push', 'noconnection');
+                     }
+                }
+            }
+
+            prevWakeUpTime = currentTime;
+        },
+
+        setupWakeupDetector = function (newinterval, newlimit) {
+            if (newinterval > 0 && OK.lss && OK.lss.isMaster()) {
+                if (newinterval != wakeupDetectorInterval || !wakeupDetectorTimerId) {
+                    cancelWakeupDetector();
+                    wakeupDetectorTimerId = setInterval(runWakeupDetector, newinterval);
+                }
+            } else {
+                cancelWakeupDetector();
+            }
+            wakeupDetectorInterval = newinterval;
+            wakeupDetectorTimeLimit = newlimit;
+        },
+
+        cancelWakeupDetector = function () {
+            if (wakeupDetectorTimerId) {
+                clearInterval(wakeupDetectorTimerId);
+                wakeupDetectorTimerId = null;
+            }
+        },
+
+        isDebugEnabled = function () {
+            var debug = cookie.readCookie('dme');
+            return (debug && ('true' === debug.toLowerCase())) || document.getElementById('__gwtd__m');
+        },
+
+        logToConsole = function(text) {
+            if(isDebugEnabled() && console) {
+                console.log(new Date(), text);
+            }
+        };
+
+    return {
+        isMaster: function () {
+            return OK.lss && OK.lss.isMaster();
+        },
+        /** DateTimeUtil */
+        getClientServerTimeDiff: function() {
+            return timeDiffUtil.adaptive;
+        },
+        getCurrentServerTime: function() {
+            return Date.now() - this.getClientServerTimeDiff();
+        },
+        /** NewsFetchConsumer */
+        updateParam: function(/* string */ name, /* string */ value) {
+            params[name] = value;
+        },
+        addBlock: function(/* string */ blockName) {
+            blocks.push(blockName);
+            if(fireCachedData) {
+                fireCachedData();
+            }
+            for (var i = 0; i < blocksToCache.length; i++) {
+                if (blockName === blocksToCache[i]) {
+                    return;
+                }
+            }
+            if (currentTransport === 'SSE') {
+                closeConnection('upd-block-' + blockName);
+                reSchedule(cNextFetchTime);
+            }
+        },
+        removeBlock: function(/* string */ blockName) {
+            var index = blocks.indexOf(blockName);
+
+            if (index > -1) {
+                blocks.splice(index, 1);
+            }
+        },
+        /** PeriodicHook */
+        setConfiguration: function(/* json */ _conf) {
+            var _pushStreamingParam,
+                _cacheEntrySize;
+
+            cStateId                = _conf[PARAM_STATE_ID] || cStateId;
+            cNextLongPolling        = _conf[PARAM_NEXT_LONG_POLLING_TIME] || cNextLongPolling;
+            cLPRecoveryTime         = _conf['p_LPR'] || 150000;
+            cNextFetchTime          = _conf['fetchTime'] || 100;
+            cFailureDelay           = _conf['p_DFF'] || 5000;
+            cSSEBufferSize          = _conf['p_PSB'] || 2097152;
+            cSSERecoveryTime        = _conf['p_SRT'] || 180000;
+            cSSEFirstRequestRecTime = _conf['p_SFRRT'] || 180000;
+            cSSEtoLPRecoveryTime    = _conf['p_SLPT'] || 0;
+            cSSEMaxFailCount        = _conf['p_SMF'] || 2;
+            cSSEWaitingTimeout      = _conf['p_SWT'] || 60000;
+            splitTZDCookie          = _conf['sTZDc'] === true;
+            blocksToCache           = (_conf['cBlocks'] || '').split(',');
+            currentRecoveryTime     = calculateCurrentRecoveryTimeout();
+            _pushStreamingParam = _conf['p_PSE'] === true;
+            if (cIsPushStreaming !== _pushStreamingParam) {
+                failsCount = 0;
+                lastCheckSSETime = 0;
+                if (cIsPushStreaming && currentSSEState !== STATE_WAITING) {
+                    stopScheduling();
+                    currentTransport = 'LP';
+                    schedule(cNextFetchTime);
+                }
+                cIsPushStreaming = _pushStreamingParam;
+                currentTransport = cIsPushStreaming ? 'SSE' : 'LP';
+            }
+            if (_conf['serverTime']) {
+                adaptServerTime(_conf['serverTime']);
+            }
+            _cacheEntrySize = _conf['p_CES'] || 0;
+            if (_cacheEntrySize !== cacheEntrySize) {
+                cacheEntrySize = _cacheEntrySize;
+                setCacheEntrySize(cacheEntrySize);
+            }
+
+            setupWakeupDetector(_conf['p_WDI'] || 0, _conf['p_WDTL'] || 120000);
+            var conf = _conf['params'];
+            if (conf) {
+                var param;
+                for (param in conf) {
+                    if (conf.hasOwnProperty(param)) {
+                        params[param] = conf[param];
+                    }
+                }
+            }
+        },
+        init: function(/* function */ _isFloodOrError, /* function */ _processCallback,
+                       /* function */ _destroyOnePush, /* function */ _fireCachedData,
+                       /* function */ _setCacheEntrySize) {
+            isFloodOrError    = _isFloodOrError;
+            processCallback   = _processCallback;
+            destroyOnePush    = _destroyOnePush;
+            fireCachedData    = _fireCachedData;
+            setCacheEntrySize = _setCacheEntrySize;
+            checkSSEState     = false;
+        },
+        getStateParamString: getStateParamString,
+        scheduleFetch: function() {
+            cStateId = 0;
+            schedule(cNextFetchTime);
+            setupWakeupDetector(wakeupDetectorInterval, wakeupDetectorTimeLimit);
+        },
+        stopScheduling: stopScheduling
+    };
+});
